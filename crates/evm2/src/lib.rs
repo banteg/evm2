@@ -24,7 +24,7 @@ pub mod evm;
 pub use evm::config::EvmTypesHost;
 pub use evm::{
     AccountInfo, BlockStateAccumulator, Evm, ExecutedTx, InterpreterRunner, JournalEntry,
-    PendingState, TxResult, TxResultExt, TxResultWithState, config,
+    PendingState, TxResult, TxResultExt, TxResultWithState, TxStateChanges, config,
     config::{
         BaseEvmConfig, BaseEvmConfigSelector, BaseEvmTypes, EvmConfig, EvmConfigSelector, EvmTypes,
         ExecutionConfig,
@@ -47,7 +47,7 @@ pub mod version;
 pub use version::{EvmFeatures, OpcodeChange, OpcodeConfig, OpcodeView, Version};
 
 mod spec_id;
-pub use spec_id::SpecId;
+pub use spec_id::{ParseSpecIdError, SpecId};
 
 mod once_lock;
 mod storage_key;

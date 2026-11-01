@@ -5,10 +5,7 @@ use super::{
     StorageSlot, Tracked,
 };
 use crate::interpreter::Word;
-use alloy_primitives::{
-    Address,
-    map::{AddressMap, AddressSet},
-};
+use alloy_primitives::{Address, map::AddressMap};
 
 /// A transaction's finalized-but-uncommitted state, moved out of the EVM.
 ///
@@ -32,8 +29,6 @@ pub struct PendingState {
     /// Accounts loaded by the transaction: transaction-boundary original info, present info, and
     /// account-lifetime flags.
     pub(crate) accounts: AddressMap<Account>,
-    /// Accounts selfdestructed by the transaction.
-    pub(crate) selfdestructs: AddressSet,
 }
 
 impl PendingState {
@@ -56,14 +51,11 @@ impl PendingState {
         original: Option<AccountInfo>,
         current: Option<AccountInfo>,
     ) {
-        let code_changed = original.as_ref().map(|account| account.code_hash)
-            != current.as_ref().map(|account| account.code_hash);
-        let flags = if code_changed { AccountFlags::CODE_CHANGED } else { AccountFlags::empty() };
         let account = self.accounts.entry(address).or_default();
         *account = Account {
             original,
             present: current,
-            flags,
+            flags: AccountFlags::empty(),
             storage: core::mem::take(&mut account.storage),
         };
     }
@@ -97,21 +89,23 @@ impl PendingState {
         self.accounts.values().any(|account| account.is_changed() || account.storage.is_changed())
     }
 
+    /// Returns a borrowed view of the transaction's changes.
+    #[inline]
+    pub const fn changes(&self) -> TxStateChanges<'_> {
+        TxStateChanges::new(&self.accounts)
+    }
+
     /// Returns each loaded account's changes, in an unspecified account order.
     #[inline]
     pub fn account_changes(&self) -> impl Iterator<Item = AccountChanges<'_>> {
-        self.accounts.iter().map(|(&address, account)| {
-            account.changes(address, self.selfdestructs.contains(&address))
-        })
+        self.changes().account_changes()
     }
 
     /// Returns the changes of the account at `address`, or `None` if the transaction did not load
     /// it.
     #[inline]
     pub fn account_changes_for(&self, address: &Address) -> Option<AccountChanges<'_>> {
-        self.accounts
-            .get(address)
-            .map(|account| account.changes(*address, self.selfdestructs.contains(address)))
+        self.changes().account_changes_for(address)
     }
 }
 
@@ -125,6 +119,65 @@ impl StateChangeSource for PendingState {
     /// Changed accounts — including created or selfdestructed accounts whose info ended up
     /// unchanged — go through [`StateChangeSink::account`]; loaded-but-unchanged entries go
     /// through the read callbacks.
+    fn visit<S: StateChangeSink>(&self, sink: &mut S) -> Result<(), S::Error> {
+        self.changes().visit(sink)
+    }
+}
+
+/// A borrowed view of one transaction's state changes, whether still attached to the EVM or
+/// detached into a [`PendingState`].
+///
+/// Returned by [`ExecutedTx::changes`](crate::ExecutedTx::changes), which borrows the
+/// transaction layer in place, and by [`PendingState::changes`]. It lets a caller inspect what a
+/// transaction wrote before deciding to commit or discard it, without detaching the state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TxStateChanges<'a> {
+    accounts: Option<&'a AddressMap<Account>>,
+}
+
+impl<'a> TxStateChanges<'a> {
+    #[inline]
+    pub(crate) const fn new(accounts: &'a AddressMap<Account>) -> Self {
+        Self { accounts: Some(accounts) }
+    }
+
+    /// Returns a view with no changes.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self { accounts: None }
+    }
+
+    /// Returns whether the transaction loaded no accounts and no storage.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.accounts.is_none_or(AddressMap::is_empty)
+    }
+
+    /// Returns the current account information when the transaction loaded the account and it
+    /// exists after the transaction.
+    #[inline]
+    pub fn account_info(&self, address: &Address) -> Option<&'a AccountInfo> {
+        self.accounts?.get(address).and_then(|account| account.present.as_ref())
+    }
+
+    /// Returns each loaded account's changes, in an unspecified account order.
+    #[inline]
+    pub fn account_changes(self) -> impl Iterator<Item = AccountChanges<'a>> {
+        self.accounts.into_iter().flat_map(|accounts| {
+            accounts.iter().map(|(&address, account)| account.changes(address))
+        })
+    }
+
+    /// Returns the changes of the account at `address`, or `None` if the transaction did not load
+    /// it.
+    #[inline]
+    pub fn account_changes_for(&self, address: &Address) -> Option<AccountChanges<'a>> {
+        self.accounts?.get(address).map(|account| account.changes(*address))
+    }
+}
+
+impl StateChangeSource for TxStateChanges<'_> {
+    /// Visits the transaction's loaded entries as [`PendingState`]'s implementation does.
     fn visit<S: StateChangeSink>(&self, sink: &mut S) -> Result<(), S::Error> {
         for changes in self.account_changes() {
             changes.visit(sink)?;
@@ -171,7 +224,7 @@ mod tests {
         state.insert_account(unchanged, Some(info.clone()), Some(info.clone()));
         let destroyed = Address::with_last_byte(0xdd);
         state.insert_account(destroyed, Some(info.clone()), Some(info));
-        state.selfdestructs.insert(destroyed);
+        state.accounts.get_mut(&destroyed).unwrap().flags.insert(AccountFlags::DESTROYED);
 
         let changes = state.account_changes_for(&changed).unwrap();
         assert_eq!(changes.address, changed);
