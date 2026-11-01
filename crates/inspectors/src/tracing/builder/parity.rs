@@ -288,9 +288,11 @@ impl ParityTraceBuilder {
         let mut sub_stack = Vec::with_capacity(self.nodes.len());
 
         // Excluded precompile calls are recorded without being attached to their parent, in call
-        // order.
+        // order. Those made by a step the parent left out pair with none of its steps.
         let mut precompiles = HashMap::<usize, Vec<&CallTraceNode>>::default();
-        for node in self.nodes.iter().filter(|node| node.is_precompile()) {
+        for node in
+            self.nodes.iter().filter(|node| node.is_precompile() && !node.trace.parent_step_omitted)
+        {
             if let Some(parent) = node.parent {
                 precompiles.entry(parent).or_default().push(node);
             }
@@ -318,9 +320,8 @@ impl ParityTraceBuilder {
                         precompiles.remove(&current.idx).unwrap_or_default().into_iter();
 
                     // A child is recorded right after the step that called it, so a call step
-                    // without a following child of its kind either halted or called an excluded
-                    // precompile. A step limit or opcode filter can leave out the step of a later
-                    // child, which then follows an unrelated step.
+                    // without a following child either halted or called an excluded precompile.
+                    // A child whose step the frame left out follows an unrelated step instead.
                     let mut ordering = current.ordering.iter().peekable();
                     let mut deltas = current.trace.step_deltas.iter().peekable();
                     while let Some(member) = ordering.next() {
@@ -333,12 +334,11 @@ impl ParityTraceBuilder {
                         }
                         let mut forwarded_gas = 0;
                         let maybe_sub_call = if step.is_call_like_op() && !step.is_error() {
-                            let is_creation = |child: usize| {
-                                self.nodes[current.children[child]].trace.kind.is_any_create()
+                            let made_by_step = |child: usize| {
+                                !self.nodes[current.children[child]].trace.parent_step_omitted
                             };
                             match ordering.next_if(|next| {
-                                matches!(next, TraceMemberOrder::Call(child)
-                                    if is_creation(*child) == step.is_create_op())
+                                matches!(next, TraceMemberOrder::Call(child) if made_by_step(*child))
                             }) {
                                 Some(TraceMemberOrder::Call(child)) => {
                                     // Parity counts the gas a creation gives its child in the

@@ -1452,6 +1452,41 @@ fn create_step_without_a_child_leaves_precompile_subtraces_to_calls() {
 }
 
 #[test]
+fn call_like_step_is_not_paired_with_the_child_of_a_left_out_step() {
+    // The first step makes no child: an Amsterdam CREATE that fails its balance precheck, or a
+    // CALL to an excluded precompile. A step limit or an opcode filter leaves out the next call or
+    // create step, whose child then follows the first step.
+    let configs = |step_limit, op| {
+        [
+            TracingInspectorConfig {
+                step_limit: core::num::NonZeroU64::new(step_limit),
+                ..TracingInspectorConfig::parity_vm_trace()
+            },
+            TracingInspectorConfig {
+                record_opcodes_filter: Some(OpcodeFilter::new().enabled(op)),
+                ..TracingInspectorConfig::parity_vm_trace()
+            },
+        ]
+    };
+    let first = |code: &[u8], config, name| {
+        let trace = inspect_code(code, &hex!("00"), SpecId::AMSTERDAM, config)
+            .into_parity_builder()
+            .vm_trace();
+        trace.ops.into_iter().find(|op| op.op.as_deref() == Some(name)).unwrap()
+    };
+
+    for config in configs(4, OpCode::CREATE) {
+        let create = first(&hex!("5f5f6001f0505f5f5f5ff500"), config, "CREATE");
+        assert_eq!(create.cost, 12_000);
+        assert_eq!(create.sub, None);
+    }
+    for config in configs(8, OpCode::CALL) {
+        let call = first(&hex!("5f5f5f5f5f600461fffff1505f5f5f5f604361fffffa00"), config, "CALL");
+        assert_eq!(call.sub, Some(VmTrace::default()));
+    }
+}
+
+#[test]
 fn call_like_step_used_gas_is_the_gas_after_the_child_returns() {
     // `ex.used` of a call or create step is the parent's gas once the child returned, which the
     // next step reports as its remaining gas, whatever the config records.

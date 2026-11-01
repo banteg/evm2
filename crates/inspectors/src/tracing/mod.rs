@@ -390,6 +390,10 @@ impl TracingInspector {
         // the currently active call is the parent of the new call
         let parent = self.trace_stack.last().map(|entry| entry.trace_idx);
 
+        // The parent's call or create step is the one waiting for its `step_end`.
+        let parent_step_omitted =
+            self.step_stack.last().is_some_and(|&(_, step_idx)| step_idx == usize::MAX);
+
         let trace_idx = self.traces.push_trace(
             parent,
             push_kind,
@@ -404,6 +408,7 @@ impl TracingInspector {
                 maybe_precompile,
                 gas_limit,
                 steps,
+                parent_step_omitted,
                 ..Default::default()
             },
         );
