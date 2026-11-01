@@ -318,7 +318,9 @@ impl ParityTraceBuilder {
                         precompiles.remove(&current.idx).unwrap_or_default().into_iter();
 
                     // A child is recorded right after the step that called it, so a call step
-                    // without a following child either halted or called an excluded precompile.
+                    // without a following child of its kind either halted or called an excluded
+                    // precompile. A step limit or opcode filter can leave out the step of a later
+                    // child, which then follows an unrelated step.
                     let mut ordering = current.ordering.iter().peekable();
                     let mut deltas = current.trace.step_deltas.iter().peekable();
                     while let Some(member) = ordering.next() {
@@ -329,12 +331,27 @@ impl ParityTraceBuilder {
                         if !began_executing(step, current.trace.bytecode.as_ref()) {
                             continue;
                         }
+                        let mut forwarded_gas = 0;
                         let maybe_sub_call = if step.is_call_like_op() && !step.is_error() {
-                            match ordering.next_if(|next| matches!(next, TraceMemberOrder::Call(_)))
-                            {
+                            let is_creation = |child: usize| {
+                                self.nodes[current.children[child]].trace.kind.is_any_create()
+                            };
+                            match ordering.next_if(|next| {
+                                matches!(next, TraceMemberOrder::Call(child)
+                                    if is_creation(*child) == step.is_create_op())
+                            }) {
                                 Some(TraceMemberOrder::Call(child)) => {
+                                    // Parity counts the gas a creation gives its child in the
+                                    // step cost, also when the creation fails its precheck. Geth
+                                    // struct logs leave it out, and a call's cost has it already.
+                                    if step.is_create_op() {
+                                        forwarded_gas =
+                                            self.nodes[current.children[*child]].trace.gas_limit;
+                                    }
                                     children.get_mut(*child).and_then(Option::take)
                                 }
+                                // Only a call can reach a precompile.
+                                _ if step.is_create_op() => None,
                                 _ => precompiles
                                     .next()
                                     .filter(|node| entered_frame(node))
@@ -344,7 +361,12 @@ impl ParityTraceBuilder {
                             None
                         };
 
-                        instructions.push(self.make_instruction(step, delta, maybe_sub_call));
+                        instructions.push(self.make_instruction(
+                            step,
+                            delta,
+                            maybe_sub_call,
+                            forwarded_gas,
+                        ));
                     }
 
                     match current.parent {
@@ -369,12 +391,13 @@ impl ParityTraceBuilder {
     }
 
     /// Creates a VM instruction from a [CallTraceStep] and a [VmTrace] for the subcall if there is
-    /// one
+    /// one, adding the gas a creation forwarded to its child to the step cost
     fn make_instruction(
         &self,
         step: &CallTraceStep,
         delta: Option<&StepDelta>,
         maybe_sub_call: Option<VmTrace>,
+        forwarded_gas: u64,
     ) -> VmInstruction {
         // A halted step has no effects to report, while a `REVERT` executes like any other step.
         let halted = step.status.is_some_and(|status| status.is_halt());
@@ -389,7 +412,7 @@ impl ParityTraceBuilder {
 
         VmInstruction {
             pc: step.pc,
-            cost: step.gas_cost,
+            cost: step.gas_cost + forwarded_gas,
             ex: maybe_execution,
             sub: maybe_sub_call,
             op: Some(step.op.to_string()),

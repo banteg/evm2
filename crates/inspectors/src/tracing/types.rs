@@ -742,6 +742,12 @@ impl CallTraceStep {
         )
     }
 
+    /// Returns true if the step is a CREATE or CREATE2 operation
+    #[inline]
+    pub(crate) const fn is_create_op(&self) -> bool {
+        matches!(self.op.get(), op::CREATE | op::CREATE2)
+    }
+
     // Reverts are control flow; only exceptional halts populate a step error.
     #[inline]
     pub(crate) const fn is_error(&self) -> bool {
